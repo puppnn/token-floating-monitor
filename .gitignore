@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.env
+client_usage_today.json
+.venv/
+venv/
