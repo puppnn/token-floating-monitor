@@ -366,6 +366,26 @@ def build_local_monitor_state(error_text: str | None = None, usage_note: str = "
     )
 
 
+def build_sub2api_error_state(error_text: str, usage_note: str) -> MonitorState:
+    return MonitorState(
+        loading=False,
+        error=error_text,
+        updated_at=time.time(),
+        mode="sub2api",
+        source_label="SUB2 监控",
+        usage_source="sub2api",
+        usage_note=usage_note,
+        active_accounts=[],
+        latest_request=None,
+        latest_account_name="",
+        today_requests=0,
+        today_tokens=0,
+        today_account_cost=0.0,
+        top_accounts=[],
+        client_usage=None,
+    )
+
+
 class Sub2APIClient:
     def __init__(self) -> None:
         env = read_env_files(ENV_FILES)
@@ -477,7 +497,7 @@ class Sub2APIClient:
             return self.fetch_sub2api_state()
         except Exception as exc:
             if self.mode in {"", "auto"}:
-                return build_local_monitor_state(str(exc))
+                return build_sub2api_error_state(str(exc), usage_note)
             raise
 
     def fetch_sub2api_state(self) -> MonitorState:
