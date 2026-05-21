@@ -482,8 +482,20 @@ class Sub2APIClient:
         env = read_env_files(ENV_FILES)
         self.base_url = os.environ.get("SUB2API_BASE_URL") or env.get("SUB2API_BASE_URL") or DEFAULT_BASE_URL
         self.base_url = self.base_url.rstrip("/")
-        self.email = os.environ.get("SUB2API_ADMIN_EMAIL") or env.get("ADMIN_EMAIL") or "admin@sub2api.local"
-        self.password = os.environ.get("SUB2API_ADMIN_PASSWORD") or env.get("ADMIN_PASSWORD") or ""
+        self.email = (
+            os.environ.get("SUB2API_ADMIN_EMAIL")
+            or os.environ.get("ADMIN_EMAIL")
+            or env.get("SUB2API_ADMIN_EMAIL")
+            or env.get("ADMIN_EMAIL")
+            or "admin@sub2api.local"
+        )
+        self.password = (
+            os.environ.get("SUB2API_ADMIN_PASSWORD")
+            or os.environ.get("ADMIN_PASSWORD")
+            or env.get("SUB2API_ADMIN_PASSWORD")
+            or env.get("ADMIN_PASSWORD")
+            or ""
+        )
         self.mode = (os.environ.get("SUB2API_MONITOR_MODE") or env.get("SUB2API_MONITOR_MODE") or "auto").strip().lower()
         usage_source = os.environ.get("SUB2API_MONITOR_USAGE_SOURCE") or env.get("SUB2API_MONITOR_USAGE_SOURCE") or ""
         self.usage_source = usage_source.strip().lower() or ("both" if env_bool(env, "SUB2API_INCLUDE_LOCAL_USAGE", False) else "auto")
@@ -510,6 +522,8 @@ class Sub2APIClient:
         return False, codex_urls
 
     def _resolve_usage_source(self) -> tuple[str, str]:
+        if self.mode in {"sub2api", "server"}:
+            return "sub2api", "手动: Sub2API"
         if self.usage_source in {"sub2api", "server"}:
             return "sub2api", "手动: Sub2API"
         if self.usage_source in {"local", "local-codex", "client"}:
@@ -1035,8 +1049,16 @@ class FloatingMonitorApp:
         c.create_rectangle(COL_L + 12, y + 13, COL_L + 58, y + 15, fill=Theme.cyan, outline="")
         c.create_text(COL_L + 12, y + 22, anchor="nw", text=self._truncate(hero_name, "font_label_bold", COL_R - COL_L - 32),
                       font=self._fonts["font_label_bold"], fill=Theme.text_primary)
+        source_pill = "\u672c\u5730"
+        source_color = Theme.amber_bright
+        if self.state and self.state.usage_source == "sub2api":
+            source_pill = "Sub2API"
+            source_color = Theme.accent_green
+        elif self.state and self.state.usage_source == "both":
+            source_pill = "\u6df7\u5408"
+            source_color = Theme.cyan
         self._draw_pill(COL_L + 12, y + 44, hero_sub, hero_color, 170)
-        self._draw_pill(COL_R - 94, y + 44, "\u672c\u5730", Theme.amber_bright, 76)
+        self._draw_pill(COL_R - 94, y + 44, source_pill, source_color, 76)
         y += 82
 
         # ════════════════════════════════════════════════════════
