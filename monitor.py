@@ -482,8 +482,20 @@ class Sub2APIClient:
         env = read_env_files(ENV_FILES)
         self.base_url = os.environ.get("SUB2API_BASE_URL") or env.get("SUB2API_BASE_URL") or DEFAULT_BASE_URL
         self.base_url = self.base_url.rstrip("/")
-        self.email = os.environ.get("SUB2API_ADMIN_EMAIL") or env.get("ADMIN_EMAIL") or "admin@sub2api.local"
-        self.password = os.environ.get("SUB2API_ADMIN_PASSWORD") or env.get("ADMIN_PASSWORD") or ""
+        self.email = (
+            os.environ.get("SUB2API_ADMIN_EMAIL")
+            or os.environ.get("ADMIN_EMAIL")
+            or env.get("SUB2API_ADMIN_EMAIL")
+            or env.get("ADMIN_EMAIL")
+            or "admin@sub2api.local"
+        )
+        self.password = (
+            os.environ.get("SUB2API_ADMIN_PASSWORD")
+            or os.environ.get("ADMIN_PASSWORD")
+            or env.get("SUB2API_ADMIN_PASSWORD")
+            or env.get("ADMIN_PASSWORD")
+            or ""
+        )
         self.mode = (os.environ.get("SUB2API_MONITOR_MODE") or env.get("SUB2API_MONITOR_MODE") or "auto").strip().lower()
         usage_source = os.environ.get("SUB2API_MONITOR_USAGE_SOURCE") or env.get("SUB2API_MONITOR_USAGE_SOURCE") or ""
         self.usage_source = usage_source.strip().lower() or ("both" if env_bool(env, "SUB2API_INCLUDE_LOCAL_USAGE", False) else "auto")
