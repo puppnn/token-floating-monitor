@@ -1047,8 +1047,16 @@ class FloatingMonitorApp:
         c.create_rectangle(COL_L + 12, y + 13, COL_L + 58, y + 15, fill=Theme.cyan, outline="")
         c.create_text(COL_L + 12, y + 22, anchor="nw", text=self._truncate(hero_name, "font_label_bold", COL_R - COL_L - 32),
                       font=self._fonts["font_label_bold"], fill=Theme.text_primary)
+        source_pill = "\u672c\u5730"
+        source_color = Theme.amber_bright
+        if self.state and self.state.usage_source == "sub2api":
+            source_pill = "Sub2API"
+            source_color = Theme.accent_green
+        elif self.state and self.state.usage_source == "both":
+            source_pill = "\u6df7\u5408"
+            source_color = Theme.cyan
         self._draw_pill(COL_L + 12, y + 44, hero_sub, hero_color, 170)
-        self._draw_pill(COL_R - 94, y + 44, "\u672c\u5730", Theme.amber_bright, 76)
+        self._draw_pill(COL_R - 94, y + 44, source_pill, source_color, 76)
         y += 82
 
         # ════════════════════════════════════════════════════════
