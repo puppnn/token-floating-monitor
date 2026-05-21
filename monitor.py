@@ -522,6 +522,8 @@ class Sub2APIClient:
         return False, codex_urls
 
     def _resolve_usage_source(self) -> tuple[str, str]:
+        if self.mode in {"sub2api", "server"}:
+            return "sub2api", "手动: Sub2API"
         if self.usage_source in {"sub2api", "server"}:
             return "sub2api", "手动: Sub2API"
         if self.usage_source in {"local", "local-codex", "client"}:
