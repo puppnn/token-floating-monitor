@@ -1258,8 +1258,23 @@ class FloatingMonitorApp:
                            font=self._fonts["font_label"], fill=Theme.text_muted)
         available_rank_rows = max(1, (H - 44 - y) // 30)
         max_rank_rows = min(len(top), max(3, available_rank_rows))
+        display_top = list(top[:max_rank_rows])
+        local_account = next(
+            (
+                acc
+                for acc in top
+                if str(acc.get("health_badge") or "") == "本地"
+                or str(acc.get("name") or "").lower().startswith("client local")
+            ),
+            None,
+        )
+        if local_account and local_account not in display_top:
+            if display_top:
+                display_top[-1] = local_account
+            else:
+                display_top = [local_account]
         max_tokens = max([int(acc.get("tokens") or 0) for acc in top], default=1) or 1
-        for index, acc in enumerate(top[:max_rank_rows]):
+        for index, acc in enumerate(display_top):
             health_badge = str(acc.get("health_badge") or "")
             name_max_w = 112 if health_badge else 150
             name = self._truncate(acc.get("name", "-"), "font_label", name_max_w)
