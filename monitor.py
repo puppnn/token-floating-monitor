@@ -275,11 +275,19 @@ def update_usage_history(state: "MonitorState") -> dict[str, Any]:
     existing_cost = float(existing.get("cost") or 0)
     existing_tokens = int(existing.get("tokens") or 0)
     existing_requests = int(existing.get("requests") or 0)
+    previous = days.get(date_key(1)) if isinstance(days.get(date_key(1)), dict) else {}
+    existing_matches_previous_day = (
+        bool(previous)
+        and existing_requests == int(previous.get("requests") or 0)
+        and existing_tokens == int(previous.get("tokens") or 0)
+        and round(existing_cost, 6) == round(float(previous.get("cost") or 0), 6)
+        and (new_cost or new_tokens or new_requests)
+    )
 
     # The local clients expose usage as reconstructed snapshots, not an
     # append-only ledger. Session cleanup, recovery, or a temporary dashboard
     # read can make a later snapshot smaller, so keep the daily high-water mark.
-    if existing_cost or existing_tokens or existing_requests:
+    if (existing_cost or existing_tokens or existing_requests) and not existing_matches_previous_day:
         new_cost = max(new_cost, existing_cost)
         new_tokens = max(new_tokens, existing_tokens)
         new_requests = max(new_requests, existing_requests)
