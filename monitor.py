@@ -287,7 +287,8 @@ def update_usage_history(state: "MonitorState") -> dict[str, Any]:
     # The local clients expose usage as reconstructed snapshots, not an
     # append-only ledger. Session cleanup, recovery, or a temporary dashboard
     # read can make a later snapshot smaller, so keep the daily high-water mark.
-    if (existing_cost or existing_tokens or existing_requests) and not existing_matches_previous_day:
+    use_high_water = state.usage_source in {"local", "client", "local-codex", "both"}
+    if use_high_water and (existing_cost or existing_tokens or existing_requests) and not existing_matches_previous_day:
         new_cost = max(new_cost, existing_cost)
         new_tokens = max(new_tokens, existing_tokens)
         new_requests = max(new_requests, existing_requests)
