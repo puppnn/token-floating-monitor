@@ -963,7 +963,12 @@ class Sub2APIClient:
                 provider_tokens = int(provider.get("tokens") or 0)
                 provider_requests = int(provider.get("requests") or 0)
                 provider_cost = float(provider.get("cost") or 0)
-                if provider_tokens <= 0 and provider_requests <= 0 and provider_cost <= 0:
+                if (
+                    provider_tokens <= 0
+                    and provider_requests <= 0
+                    and provider_cost <= 0
+                    and not provider.get("show_zero")
+                ):
                     continue
                 top_accounts.append(
                     {

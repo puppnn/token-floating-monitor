@@ -336,6 +336,31 @@ def current_codex_account_label(home: Path) -> str:
     return "Codex local"
 
 
+def all_cockpit_codex_account_labels(home: Path) -> list[str]:
+    path = home / ".antigravity_cockpit" / "codex_accounts.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return []
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    if not isinstance(accounts, list):
+        return []
+    labels: list[str] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        label = cockpit_account_label(
+            str(account.get("id") or ""),
+            str(account.get("email") or ""),
+            str(account.get("api_provider_name") or account.get("name") or ""),
+        )
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
 def scan_cockpit_codex_accounts(root: Path, start: datetime, end: datetime) -> dict[str, UsageBucket]:
     db_path = root / ".antigravity_cockpit" / "codex_local_access_logs.sqlite"
     if not db_path.exists():
@@ -452,7 +477,7 @@ def latest_at_text(bucket: UsageBucket) -> str:
     return bucket.latest_at.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds")
 
 
-def bucket_to_dict(name: str, bucket: UsageBucket) -> dict[str, Any]:
+def bucket_to_dict(name: str, bucket: UsageBucket, show_zero: bool = False) -> dict[str, Any]:
     return {
         "name": name,
         "requests": bucket.requests,
@@ -465,6 +490,7 @@ def bucket_to_dict(name: str, bucket: UsageBucket) -> dict[str, Any]:
         "models": dict(sorted(bucket.models.items(), key=lambda item: item[1], reverse=True)[:8]),
         "latest_at": latest_at_text(bucket),
         "latest_model": bucket.latest_model,
+        "show_zero": show_zero,
     }
 
 
@@ -496,8 +522,16 @@ def main() -> int:
             codex_accounts.items(),
             key=lambda item: (-item[1].total_tokens, -item[1].requests, item[0]),
         )
+    codex_provider_map = {name: bucket for name, bucket in codex_provider_buckets}
+    for label in all_cockpit_codex_account_labels(home):
+        codex_provider_map.setdefault(label, UsageBucket())
+    codex_provider_buckets = sorted(
+        codex_provider_map.items(),
+        key=lambda item: (-item[1].total_tokens, -item[1].requests, item[0]),
+    )
+
     claude = scan_claude(home / ".claude" / "projects", start, end)
-    codex_providers = [bucket_to_dict(name, bucket) for name, bucket in codex_provider_buckets]
+    codex_providers = [bucket_to_dict(name, bucket, show_zero=True) for name, bucket in codex_provider_buckets]
     providers = codex_providers + [bucket_to_dict("Claude local", claude)]
     total = UsageBucket()
     for bucket in (codex, claude):
