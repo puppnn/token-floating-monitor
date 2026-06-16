@@ -701,6 +701,33 @@ def subtract_sub2api_routed_client_usage(client_usage: dict[str, Any] | None) ->
     return result
 
 
+def is_local_api_key_provider_name(name: str) -> bool:
+    return name.strip().lower().startswith("codex local - api-key-")
+
+
+def subtract_sub2api_mirrored_api_key_usage(
+    client_usage: dict[str, Any] | None,
+    server_tokens: int,
+) -> dict[str, Any] | None:
+    """Remove local API-key rows that mirror already-counted Sub2API traffic."""
+    if not isinstance(client_usage, dict) or server_tokens <= 0:
+        return client_usage
+    providers = client_usage.get("providers")
+    if not isinstance(providers, list):
+        return client_usage
+
+    result = client_usage
+    token_ceiling = max(1, int(server_tokens * 1.25))
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        name = str(provider.get("name") or "")
+        tokens = int(provider.get("tokens") or 0)
+        if is_local_api_key_provider_name(name) and 0 < tokens <= token_ceiling:
+            result = subtract_provider_from_client_usage(result, name)
+    return result
+
+
 def local_usage_from_providers(client_usage: dict[str, Any] | None, prefixes: tuple[str, ...]) -> dict[str, Any] | None:
     if not client_usage:
         return None
@@ -1228,6 +1255,7 @@ class Sub2APIClient:
         show_local_activity = include_client_usage and points_to_sub2api is not True
         raw_client_usage = self._load_client_usage_cached() if include_client_usage else None
         client_usage = subtract_sub2api_routed_client_usage(raw_client_usage)
+        client_usage = subtract_sub2api_mirrored_api_key_usage(client_usage, realtime_today_tokens)
         if (
             points_to_sub2api is True
             and isinstance(raw_client_usage, dict)
