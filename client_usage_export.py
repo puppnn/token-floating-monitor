@@ -23,9 +23,12 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = APP_DIR / "client_usage_today.json"
 CONFIG_PATH = Path(os.environ.get("CLIENT_USAGE_CONFIG") or APP_DIR / "client_usage_config.json")
 SPEED_HISTORY_PATH = Path(os.environ.get("CLIENT_USAGE_SPEED_HISTORY") or APP_DIR / "client_usage_speed_history.json")
+ACCOUNT_TIMELINE_PATH = Path(os.environ.get("CLIENT_USAGE_ACCOUNT_TIMELINE") or APP_DIR / "client_usage_account_timeline.json")
+ATTRIBUTION_LEDGER_PATH = Path(os.environ.get("CLIENT_USAGE_ATTRIBUTION_LEDGER") or APP_DIR / "client_usage_attribution_ledger.json")
 CODEX_DEFAULT_MODEL = os.environ.get("CLIENT_USAGE_CODEX_DEFAULT_MODEL", "gpt-5.5")
 MAX_SINGLE_EVENT_TOKENS = int(os.environ.get("CLIENT_USAGE_MAX_SINGLE_EVENT_TOKENS", "2000000"))
 CODEX_ACCOUNT_MATCH_WINDOW_SECONDS = int(os.environ.get("CLIENT_USAGE_CODEX_ACCOUNT_MATCH_WINDOW_SECONDS", "600"))
+CODEX_CURRENT_ACCOUNT_RECENT_SECONDS = int(os.environ.get("CLIENT_USAGE_CURRENT_ACCOUNT_RECENT_SECONDS", "1800"))
 UNASSIGNED_CODEX_LABEL = os.environ.get("CLIENT_USAGE_UNASSIGNED_CODEX_LABEL", "Unassigned local")
 CODEX_FAST_COST_MULTIPLIER = env_float("CLIENT_USAGE_CODEX_FAST_COST_MULTIPLIER", 2.0)
 CODEX_FORCE_SPEED = os.environ.get("CLIENT_USAGE_CODEX_FORCE_SPEED", "").strip().lower()
@@ -39,6 +42,7 @@ INTERNAL_SERVICE_TIER_RE = re.compile(
 PROMPT_CACHE_KEY_RE = re.compile(r'prompt_cache_key:\s*Some\(\"(?P<key>[^\"]+)\"\)')
 JSON_PROMPT_CACHE_KEY_RE = re.compile(r'"prompt_cache_key"\s*:\s*"(?P<key>[^"]+)"')
 THREAD_ID_RE = re.compile(r'\bthread\.id=(?P<key>[A-Za-z0-9_-]+)')
+TURN_ID_RE = re.compile(r'\b(?:turn\.id|turn_id)=(?P<key>[A-Za-z0-9_-]+)')
 CONVERSATION_ID_RE = re.compile(r'\bconversation\.id=(?P<key>[A-Za-z0-9_-]+)')
 SESSION_LOOP_THREAD_ID_RE = re.compile(r'\bsession_loop\{thread_id=(?P<key>[A-Za-z0-9_-]+)\}')
 SUB2API_ROUTED_CODEX_LABEL = os.environ.get("CLIENT_USAGE_SUB2API_ROUTED_CODEX_LABEL", "Codex via Sub2API")
@@ -104,6 +108,7 @@ class UsageEvent:
     session_id: str = ""
     request_key: str = ""
     route: str = ""
+    request_at: datetime | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -213,7 +218,7 @@ def codex_log_ids(text: str, response: dict[str, Any] | None = None) -> list[str
             key = str(value or "").strip()
             if key and key not in keys:
                 keys.append(key)
-    for pattern in (CONVERSATION_ID_RE, THREAD_ID_RE, SESSION_LOOP_THREAD_ID_RE, PROMPT_CACHE_KEY_RE, JSON_PROMPT_CACHE_KEY_RE):
+    for pattern in (CONVERSATION_ID_RE, THREAD_ID_RE, TURN_ID_RE, SESSION_LOOP_THREAD_ID_RE, PROMPT_CACHE_KEY_RE, JSON_PROMPT_CACHE_KEY_RE):
         for match in pattern.finditer(text or ""):
             key = match.group("key").strip()
             if key and key not in keys:
@@ -286,6 +291,7 @@ def make_codex_event(
     session_id: str = "",
     request_key: str = "",
     route: str = "",
+    request_at: datetime | None = None,
 ) -> UsageEvent | None:
     if when is None:
         return None
@@ -306,6 +312,7 @@ def make_codex_event(
         session_id=str(session_id or "").strip(),
         request_key=str(request_key or "").strip(),
         route=str(route or "").strip().lower(),
+        request_at=request_at,
     )
 
 
@@ -426,6 +433,7 @@ def codex_event_from_log_fields(text: str, ts: Any) -> UsageEvent | None:
         session_id=session_id,
         request_key=request_key or session_id,
         route=detect_codex_route(text),
+        request_at=when,
     )
 
 
@@ -687,7 +695,10 @@ def apply_codex_route_hints(events: list[UsageEvent], markers: list[RouteMarker]
                 continue
             pos = bisect_right(times_for_key, event.when) - 1
             if pos >= 0:
-                event.route = markers_for_key[pos].route
+                marker = markers_for_key[pos]
+                event.route = marker.route
+                if event.request_at is None:
+                    event.request_at = marker.when
                 break
 
 
@@ -821,6 +832,23 @@ def dedupe_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
     return result
 
 
+def codex_event_id(event: UsageEvent) -> str:
+    time_key = event.request_at or event.when
+    parts = [
+        (event.session_id or event.request_key or "").strip(),
+        str(int(time_key.replace(tzinfo=LOCAL_TZ).timestamp() * 1000)),
+        event.model,
+        str(event.input_tokens),
+        str(event.cached_tokens),
+        str(event.output_tokens),
+    ]
+    return "|".join(parts)
+
+
+def usage_event_attribution_time(event: UsageEvent) -> datetime:
+    return event.request_at or event.when
+
+
 def usage_event_info_score(event: UsageEvent) -> int:
     score = 0
     if event.route:
@@ -830,6 +858,8 @@ def usage_event_info_score(event: UsageEvent) -> int:
     if event.request_key:
         score += 2
     if event.cost_multiplier is not None:
+        score += 1
+    if event.request_at is not None:
         score += 1
     return score
 
@@ -907,6 +937,96 @@ def current_codex_account_label(home: Path) -> str:
         if account_id:
             return f"Codex local - {account_id}"
     return "Codex local"
+
+
+def load_account_timeline() -> list[AccountMarker]:
+    data = load_json_object(ACCOUNT_TIMELINE_PATH)
+    raw_records = data.get("records")
+    if not isinstance(raw_records, list):
+        return []
+    markers: list[AccountMarker] = []
+    for item in raw_records:
+        if not isinstance(item, dict):
+            continue
+        when = parse_dt(item.get("at"))
+        label = str(item.get("label") or "").strip()
+        if when is None or not label:
+            continue
+        markers.append(AccountMarker(when=when, label=label, model=CODEX_DEFAULT_MODEL, kind="switch"))
+    markers.sort(key=lambda marker: marker.when)
+    return markers
+
+
+def record_current_account_snapshot(home: Path, now: datetime) -> None:
+    label = current_codex_account_label(home)
+    if not label or label == "Codex local":
+        return
+    markers = load_account_timeline()
+    if markers and markers[-1].label == label:
+        return
+    markers.append(AccountMarker(when=now, label=label, model=CODEX_DEFAULT_MODEL, kind="switch"))
+    cutoff = now - timedelta(days=120)
+    compact = [marker for marker in markers if marker.when >= cutoff]
+    write_json_object(
+        ACCOUNT_TIMELINE_PATH,
+        {
+            "schema": 1,
+            "updated_at": now.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
+            "records": [
+                {
+                    "at": marker.when.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
+                    "label": marker.label,
+                }
+                for marker in compact
+            ],
+        },
+    )
+
+
+def account_label_for_event(
+    event: UsageEvent,
+    markers: list[AccountMarker],
+    current_label: str = "",
+    now: datetime | None = None,
+) -> str:
+    markers = sorted(markers, key=lambda marker: marker.when)
+    switch_markers = [marker for marker in markers if marker.kind == "switch"]
+    switch_times = [marker.when for marker in switch_markers]
+    request_markers = [marker for marker in markers if marker.kind != "switch"]
+    request_times = [marker.when for marker in request_markers]
+    label = account_label_at_time(event, switch_markers, switch_times, request_markers, request_times)
+    if (
+        label == UNASSIGNED_CODEX_LABEL
+        and current_label
+        and now is not None
+        and 0 <= (now - usage_event_attribution_time(event)).total_seconds() <= CODEX_CURRENT_ACCOUNT_RECENT_SECONDS
+    ):
+        label = current_label
+    return label
+
+
+def load_attribution_ledger() -> dict[str, str]:
+    data = load_json_object(ATTRIBUTION_LEDGER_PATH)
+    ledger = data.get("events")
+    if not isinstance(ledger, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in ledger.items():
+        label = str(value or "").strip()
+        if key and label:
+            result[str(key)] = label
+    return result
+
+
+def save_attribution_ledger(ledger: dict[str, str], now: datetime) -> None:
+    write_json_object(
+        ATTRIBUTION_LEDGER_PATH,
+        {
+            "schema": 1,
+            "updated_at": now.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
+            "events": dict(sorted(ledger.items())),
+        },
+    )
 
 
 def all_cockpit_codex_account_labels(home: Path) -> list[str]:
@@ -1005,6 +1125,23 @@ def load_client_usage_config() -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_json_object(path: Path, data: dict[str, Any]) -> None:
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def parse_speed_overrides(value: str) -> dict[str, str]:
@@ -1706,8 +1843,17 @@ def attribute_codex_events_to_account_markers(
     events: list[UsageEvent],
     markers: list[AccountMarker],
     cost_multiplier_by_label: dict[str, float] | None = None,
+    attribution_ledger: dict[str, str] | None = None,
+    current_label: str = "",
+    now: datetime | None = None,
 ) -> dict[str, UsageBucket]:
-    attributed = attribute_codex_events_by_account(events, markers)
+    attributed = attribute_codex_events_by_account(
+        events,
+        markers,
+        attribution_ledger,
+        current_label,
+        now,
+    )
     multipliers = cost_multiplier_by_label or {}
     buckets: dict[str, UsageBucket] = {}
     for label, account_events in attributed.items():
@@ -1729,17 +1875,64 @@ def latest_marker_by_label(markers: list[AccountMarker]) -> dict[str, datetime]:
     return latest
 
 
+def account_label_at_time(
+    event: UsageEvent,
+    switch_markers: list[AccountMarker],
+    switch_times: list[datetime],
+    request_markers: list[AccountMarker],
+    request_times: list[datetime],
+) -> str:
+    event_time = usage_event_attribution_time(event)
+    label = ""
+    if switch_markers:
+        switch_pos = bisect_right(switch_times, event_time) - 1
+        if switch_pos >= 0:
+            label = switch_markers[switch_pos].label
+    if label:
+        return label
+
+    pos = bisect_left(request_times, event_time)
+    best_marker: AccountMarker | None = None
+    best_delta = float("inf")
+    for idx in (pos - 1, pos):
+        if idx < 0 or idx >= len(request_markers):
+            continue
+        delta = abs((event_time - request_markers[idx].when).total_seconds())
+        if delta < best_delta:
+            best_delta = delta
+            best_marker = request_markers[idx]
+    return (
+        best_marker.label
+        if best_marker is not None and best_delta <= CODEX_ACCOUNT_MATCH_WINDOW_SECONDS
+        else UNASSIGNED_CODEX_LABEL
+    )
+
+
 def attribute_codex_events_by_account(
     events: list[UsageEvent],
     markers: list[AccountMarker],
+    attribution_ledger: dict[str, str] | None = None,
+    current_label: str = "",
+    now: datetime | None = None,
 ) -> dict[str, list[UsageEvent]]:
     attributed: dict[str, list[UsageEvent]] = {}
     if not events:
         return attributed
     if not markers:
-        account_events = attributed.setdefault(UNASSIGNED_CODEX_LABEL, [])
         for event in events:
-            account_events.append(event)
+            event_id = codex_event_id(event)
+            label = attribution_ledger.get(event_id, "") if attribution_ledger is not None else ""
+            if not label:
+                label = UNASSIGNED_CODEX_LABEL
+                if (
+                    current_label
+                    and now is not None
+                    and 0 <= (now - usage_event_attribution_time(event)).total_seconds() <= CODEX_CURRENT_ACCOUNT_RECENT_SECONDS
+                ):
+                    label = current_label
+                if attribution_ledger is not None and event_id:
+                    attribution_ledger[event_id] = label
+            attributed.setdefault(label, []).append(event)
         return attributed
 
     markers = sorted(markers, key=lambda marker: marker.when)
@@ -1747,30 +1940,21 @@ def attribute_codex_events_by_account(
     switch_times = [marker.when for marker in switch_markers]
     request_markers = [marker for marker in markers if marker.kind != "switch"]
     request_times = [marker.when for marker in request_markers]
+    ledger = attribution_ledger
     for event in events:
-        label = ""
-        if event.route == "sub2api":
-            label = SUB2API_ROUTED_CODEX_LABEL
-        if not label and switch_markers:
-            switch_pos = bisect_right(switch_times, event.when) - 1
-            if switch_pos >= 0:
-                label = switch_markers[switch_pos].label
+        event_id = codex_event_id(event)
+        label = ledger.get(event_id, "") if ledger is not None else ""
         if not label:
-            pos = bisect_left(request_times, event.when)
-            best_marker: AccountMarker | None = None
-            best_delta = float("inf")
-            for idx in (pos - 1, pos):
-                if idx < 0 or idx >= len(request_markers):
-                    continue
-                delta = abs((event.when - request_markers[idx].when).total_seconds())
-                if delta < best_delta:
-                    best_delta = delta
-                    best_marker = request_markers[idx]
-            label = (
-                best_marker.label
-                if best_marker is not None and best_delta <= CODEX_ACCOUNT_MATCH_WINDOW_SECONDS
-                else UNASSIGNED_CODEX_LABEL
-            )
+            label = account_label_at_time(event, switch_markers, switch_times, request_markers, request_times)
+            if (
+                label == UNASSIGNED_CODEX_LABEL
+                and current_label
+                and now is not None
+                and 0 <= (now - usage_event_attribution_time(event)).total_seconds() <= CODEX_CURRENT_ACCOUNT_RECENT_SECONDS
+            ):
+                label = current_label
+            if ledger is not None and event_id:
+                ledger[event_id] = label
         attributed.setdefault(label, []).append(event)
     return attributed
 
@@ -1836,8 +2020,6 @@ def bucket_to_dict(name: str, bucket: UsageBucket, show_zero: bool = False) -> d
         "latest_model": bucket.latest_model,
         "show_zero": show_zero,
     }
-    if name == SUB2API_ROUTED_CODEX_LABEL:
-        result["routed_to_sub2api"] = True
     if bucket.latest_app_speed:
         result.update(
             {
@@ -1863,6 +2045,8 @@ def build_codex_window_stats(
     home: Path,
     sessions_root: Path,
     now: datetime,
+    attribution_ledger: dict[str, str],
+    current_label: str,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     window_end = now + timedelta(seconds=1)
     window_5h_start = now - timedelta(hours=5)
@@ -1894,6 +2078,9 @@ def build_codex_window_stats(
             events_7d,
             markers_7d,
             cost_multiplier_by_label,
+            attribution_ledger,
+            current_label,
+            now,
         )
 
         events_5h = scan_all_codex_events(home, sessions_root, window_5h_start, window_end)
@@ -1904,6 +2091,9 @@ def build_codex_window_stats(
             events_5h,
             markers_5h,
             cost_multiplier_by_label,
+            attribution_ledger,
+            current_label,
+            now,
         )
 
     (
@@ -1932,7 +2122,13 @@ def build_codex_window_stats(
         apply_codex_speed_fallback(aligned_events, speed_markers)
         aligned_markers = scan_cockpit_codex_switch_markers(home, aligned_scan_start, window_end)
         aligned_markers.extend(scan_cockpit_codex_account_markers(home, aligned_scan_start, window_end))
-        attributed_events = attribute_codex_events_by_account(aligned_events, aligned_markers)
+        attributed_events = attribute_codex_events_by_account(
+            aligned_events,
+            aligned_markers,
+            attribution_ledger,
+            current_label,
+            now,
+        )
         for label, account_events in attributed_events.items():
             direct_cutoff = direct_latest.get(label)
             if direct_cutoff is not None:
@@ -2003,6 +2199,9 @@ def main() -> int:
 
     home = Path(os.path.expanduser("~"))
     codex_sessions_root = home / ".codex" / "sessions"
+    record_current_account_snapshot(home, now)
+    attribution_ledger = load_attribution_ledger()
+    current_label = current_codex_account_label(home)
     speed_by_account = cockpit_codex_speed_by_label(home)
     cost_multiplier_by_label = {
         label: float(meta.get("cost_multiplier") or 1.0)
@@ -2014,6 +2213,7 @@ def main() -> int:
     codex_jsonl = bucket_from_codex_events(codex_events)
     codex_accounts = scan_cockpit_codex_accounts(home, start, end)
     markers = scan_cockpit_codex_switch_markers(home, start, end)
+    markers.extend(load_account_timeline())
     account_markers = scan_cockpit_codex_account_markers(home, start, end)
     markers.extend(account_markers)
     direct_latest = latest_marker_by_label(account_markers)
@@ -2021,12 +2221,15 @@ def main() -> int:
         codex_events,
         markers,
         cost_multiplier_by_label,
+        attribution_ledger,
+        current_label,
+        now,
     )
     if codex_accounts:
         for label, bucket in attributed.items():
             cutoff = direct_latest.get(label)
             filtered = UsageBucket()
-            for event in attribute_codex_events_by_account(codex_events, markers).get(label, []):
+            for event in attribute_codex_events_by_account(codex_events, markers, attribution_ledger, current_label, now).get(label, []):
                 if cutoff is not None and event.when <= cutoff + timedelta(seconds=2):
                     continue
                 add_codex_event_to_bucket(
@@ -2063,7 +2266,14 @@ def main() -> int:
     claude = scan_claude(home / ".claude" / "projects", start, end)
     window_stats_by_account: dict[str, dict[str, dict[str, Any]]] = {}
     if day == now.date():
-        window_stats_by_account = build_codex_window_stats(home, codex_sessions_root, now)
+        window_stats_by_account = build_codex_window_stats(
+            home,
+            codex_sessions_root,
+            now,
+            attribution_ledger,
+            current_label,
+        )
+    save_attribution_ledger(attribution_ledger, now)
 
     codex_providers = []
     for name, bucket in codex_provider_buckets:
