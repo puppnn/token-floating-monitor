@@ -1186,6 +1186,10 @@ class Sub2APIClient:
         self._client_usage_cache = None
         self._client_usage_cache_at = 0.0
 
+    def clear_runtime_caches(self) -> None:
+        self.clear_client_usage_cache()
+        self._account_window_cache.clear()
+
     def _load_account_windows_cached(self, account: dict[str, Any]) -> dict[str, Any]:
         account_id = int(account.get("id") or 0)
         if account_id <= 0 or not account_has_email(account) or str(account.get("type") or "").lower() != "oauth":
@@ -1658,6 +1662,7 @@ class FloatingMonitorApp:
         self._account_range_auto_selected = False
         self._topmost_repair_scheduled = False
         self._ignore_configure = False
+        self._current_day_key = today_key()
 
         # ── root window ──
         self.root = tk.Tk()
@@ -1712,6 +1717,7 @@ class FloatingMonitorApp:
         self._fade_in()
         self.refresh_async()
         self._schedule_auto_refresh()
+        self._schedule_midnight_refresh()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  GEOMETRY HELPERS
@@ -3445,11 +3451,39 @@ class FloatingMonitorApp:
             self._maybe_select_cycle_range(result)
         self._draw()
 
+    def _handle_day_rollover(self, force: bool = False) -> bool:
+        current_day = today_key()
+        if not force and current_day == self._current_day_key:
+            return False
+        self._current_day_key = current_day
+        self.client.clear_runtime_caches()
+        self._account_range_auto_selected = False
+        if not self._account_range_user_selected:
+            self._account_range = "today"
+        return True
+
     def _schedule_auto_refresh(self) -> None:
         if self.closed:
             return
+        self._handle_day_rollover()
         self.refresh_async()
         self.root.after(REFRESH_SECONDS * 1000, self._schedule_auto_refresh)
+
+    def _schedule_midnight_refresh(self) -> None:
+        if self.closed:
+            return
+        now = datetime.now(CN_TZ)
+        next_day = now.date() + timedelta(days=1)
+        next_midnight = datetime.combine(next_day, datetime.min.time(), tzinfo=CN_TZ)
+        delay_ms = max(1000, int((next_midnight - now).total_seconds() * 1000) + 5000)
+        self.root.after(delay_ms, self._on_midnight_refresh)
+
+    def _on_midnight_refresh(self) -> None:
+        if self.closed:
+            return
+        self._handle_day_rollover(force=True)
+        self.refresh_async()
+        self._schedule_midnight_refresh()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  LIFECYCLE
