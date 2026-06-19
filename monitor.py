@@ -26,7 +26,7 @@ ENV_FILES = [
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 REFRESH_SECONDS = 3
 CLIENT_USAGE_CACHE_SECONDS = int(os.environ.get("SUB2API_CLIENT_USAGE_CACHE_SECONDS", "10"))
-CLIENT_USAGE_EXPORT_TIMEOUT_SECONDS = int(os.environ.get("SUB2API_CLIENT_USAGE_EXPORT_TIMEOUT_SECONDS", "15"))
+CLIENT_USAGE_EXPORT_TIMEOUT_SECONDS = int(os.environ.get("SUB2API_CLIENT_USAGE_EXPORT_TIMEOUT_SECONDS", "90"))
 ACCOUNT_WINDOW_CACHE_SECONDS = int(os.environ.get("SUB2API_ACCOUNT_WINDOW_CACHE_SECONDS", "60"))
 LOCAL_ACTIVE_WINDOW_SECONDS = int(os.environ.get("SUB2API_LOCAL_ACTIVE_WINDOW_SECONDS", "300"))
 CLIENT_USAGE_EXPORT = Path(os.environ.get("CLIENT_USAGE_EXPORT") or APP_DIR / "client_usage_export.py")
@@ -40,6 +40,10 @@ if not CLIENT_USAGE_JSON.exists():
     if fallback_json.exists():
         CLIENT_USAGE_JSON = fallback_json
 CLIENT_USAGE_PYTHON = os.environ.get("SUB2API_CLIENT_USAGE_PYTHON") or sys.executable
+if Path(CLIENT_USAGE_PYTHON).name.lower() == "pythonw.exe":
+    console_python = Path(CLIENT_USAGE_PYTHON).with_name("python.exe")
+    if console_python.exists():
+        CLIENT_USAGE_PYTHON = str(console_python)
 USAGE_HISTORY_JSON = Path(os.environ.get("SUB2API_USAGE_HISTORY_JSON") or APP_DIR / "usage_history.json")
 CLIENT_USAGE_ROUTE_LABELS_JSON = Path(
     os.environ.get("CLIENT_USAGE_ROUTE_LABELS_JSON") or APP_DIR / "client_usage_route_labels.json"
