@@ -529,13 +529,12 @@ def local_active_accounts_from_client_usage(
         if not is_recent_activity(latest_at):
             continue
         provider_name = str(provider.get("name") or "Local client")
-        recent_active = max(1, int(provider.get("recent_active") or 1))
         active.append(
             {
                 "id": f"local-{index}",
                 "name": f"LOCAL - {local_provider_display_name(provider_name)}",
-                "current": recent_active,
-                "max": recent_active,
+                "current": 1,
+                "max": 1,
                 "model": provider.get("latest_model") or "-",
                 "source": "LOCAL",
                 "speed_badge": provider.get("speed_badge") or "",
@@ -1563,66 +1562,66 @@ class Sub2APIClient:
 
 
 class Theme:
-    """Cockpit-inspired dark amber floating card palette."""
+    """Cadence-inspired warm paper card palette."""
     # ── base surfaces ──
-    bg_dark = "#1E1E1E"
-    bg_card = "#1E1E1E"
-    bg_section = "#2A2D2E"
-    bg_lift = "#33373A"
-    bg_hover = "#33373A"
+    bg_dark = "#F5F1EA"
+    bg_card = "#F7F3EC"
+    bg_section = "#ECE6DD"
+    bg_lift = "#FFFDF8"
+    bg_hover = "#E6DED2"
 
     # ── amber accent ramp ──
-    amber_dim = "#264F78"
-    amber = "#3794FF"
-    amber_bright = "#FFFFFF"
-    amber_glow = "#6CB6FF"
+    amber_dim = "#D8A57F"
+    amber = "#C7603F"
+    amber_bright = "#28231F"
+    amber_glow = "#E4B58E"
 
     # ── secondary accents ──
-    cyan = "#4EC9B0"
-    cyan_dim = "#264F78"
-    violet = "#A78BFA"
-    blue = "#4F9CF7"
+    cyan = "#8F6A4C"
+    cyan_dim = "#D9CDBF"
+    violet = "#9C6A4B"
+    blue = "#6B7FBF"
 
     # ── text ──
-    text_primary = "#CCCCCC"
-    text_secondary = "#C5C5C5"
-    text_muted = "#858585"
+    text_primary = "#28231F"
+    text_secondary = "#6F6960"
+    text_muted = "#9A9186"
 
     # ── semantic ──
-    accent_cyan = "#4EC9B0"
-    accent_red = "#F48771"
-    accent_green = "#4EC9B0"
-    quota_red_bg = "#3A1F1B"
-    quota_amber_bg = "#332B12"
-    quota_green_bg = "#15352F"
-    ag_bg = "#1E1E1E"
-    ag_surface = "#2A2D2E"
-    ag_surface_hover = "#33373A"
-    ag_border = "#3C3C3C"
-    ag_divider = "#343434"
-    ag_accent = "#3794FF"
-    ag_bar = "#0E70C0"
-    ag_success = "#4EC9B0"
-    ag_warn = "#CCA700"
-    ag_crit = "#F48771"
-    ag_muted = "#858585"
-    ag_input = "#4F9CF7"
-    ag_cache = "#A78BFA"
-    ag_output = "#4ADE80"
-    ag_reason = "#F59E0B"
+    accent_cyan = "#8F6A4C"
+    accent_red = "#B85A39"
+    accent_green = "#C7603F"
+    quota_red_bg = "#F1D4C2"
+    quota_amber_bg = "#F2E1C8"
+    quota_green_bg = "#ECE4D7"
+    ag_bg = "#E6E0D7"
+    ag_surface = "#FFFDF8"
+    ag_surface_hover = "#F0E8DD"
+    ag_border = "#DDD4C7"
+    ag_divider = "#E4DCCF"
+    ag_accent = "#C7603F"
+    ag_bar = "#D9915C"
+    ag_success = "#C7603F"
+    ag_warn = "#B9853C"
+    ag_crit = "#A9472C"
+    ag_muted = "#8B8176"
+    ag_input = "#D89A6D"
+    ag_cache = "#C8784C"
+    ag_output = "#B55D35"
+    ag_reason = "#E0B27C"
 
     # ── misc ──
-    border = "#3C3C3C"
-    shadow = "#000000"
+    border = "#DDD4C7"
+    shadow = "#BEB4A7"
     transparent = "#010203"
 
     # ── fonts (family, size, weight) ──
-    font_title = ("Segoe UI", 14, "bold")
+    font_title = ("Georgia", 19, "bold")
     font_section = ("Segoe UI", 11, "bold")
     font_label = ("Segoe UI", 10, "normal")
     font_label_bold = ("Segoe UI", 10, "bold")
-    font_value = ("Consolas", 16, "bold")
-    font_value_sm = ("Consolas", 13, "bold")
+    font_value = ("Georgia", 18, "bold")
+    font_value_sm = ("Georgia", 14, "bold")
     font_tiny = ("Segoe UI", 9, "normal")
     font_micro = ("Segoe UI", 8, "normal")
     font_icon = ("Segoe UI", 13, "normal")
@@ -1799,7 +1798,7 @@ class FloatingMonitorApp:
         x = min(max(8, self._tooltip_pos[0] + 12), max(8, W - width - 8))
         y = min(max(8, self._tooltip_pos[1] + 14), max(8, H - height - 8))
         self._draw_rounded_rect(x, y, x + width, y + height, r=6,
-                                fill="#252526", outline=Theme.ag_accent, width=1)
+                                fill=Theme.bg_lift, outline=Theme.ag_accent, width=1)
         for index, line in enumerate(lines):
             self.canvas.create_text(x + 9, y + 7 + index * 18, anchor="nw",
                                     text=line, font=self._fonts["font_micro"], fill=Theme.text_primary)
@@ -1962,16 +1961,16 @@ class FloatingMonitorApp:
     @staticmethod
     def _activity_color(intensity: float) -> str:
         if intensity <= 0:
-            return "#262626"
+            return "#DED8CF"
         if intensity < 0.18:
-            return "#0E4429"
+            return "#E8C9AA"
         if intensity < 0.38:
-            return "#006D32"
+            return "#E3AE7D"
         if intensity < 0.68:
-            return "#26A641"
+            return "#D98E55"
         if intensity < 0.9:
-            return "#39D353"
-        return "#79E36B"
+            return "#CA6D39"
+        return "#A9472C"
 
     def _trend_token_color(self, intensity: float, is_today: bool = False) -> str:
         if is_today:
@@ -2234,7 +2233,7 @@ class FloatingMonitorApp:
                 if tokens > 0:
                     shine_w = max(3, int(cell_w * min(1.0, intensity) * 0.18))
                     self._draw_rounded_rect(x1 + 3, grid_y + 3, x1 + 3 + shine_w, grid_y + 6,
-                                            r=2, fill="#79E36B", outline="")
+                                            r=2, fill=Theme.amber_glow, outline="")
                 self._add_tooltip(
                     x1,
                     grid_y,
@@ -2339,7 +2338,7 @@ class FloatingMonitorApp:
         c.create_text(col_l, legend_y + 1, anchor="nw", text="Less",
                       font=self._fonts["font_micro"], fill=Theme.ag_muted)
         legend_x = col_l + 30
-        for idx, color in enumerate(["#262626", "#0E4429", "#006D32", "#26A641", "#79E36B"]):
+        for idx, color in enumerate(["#DED8CF", "#E8C9AA", "#E3AE7D", "#D98E55", "#A9472C"]):
             self._draw_rounded_rect(legend_x + idx * 14, legend_y, legend_x + idx * 14 + 10, legend_y + 10,
                                     r=2, fill=color, outline=Theme.ag_border)
         c.create_text(legend_x + 74, legend_y + 1, anchor="nw", text="More",
@@ -2633,7 +2632,7 @@ class FloatingMonitorApp:
                 elif intensity > 0.33:
                     color = Theme.ag_bar
                 elif intensity > 0:
-                    color = "#1F6FEB"
+                    color = Theme.amber_glow
                 x1 = col_l + col * (cell + cell_gap)
                 y1 = y + row * (cell + cell_gap)
                 self._draw_rounded_rect(x1, y1, x1 + cell, y1 + cell, r=3, fill=color, outline=Theme.ag_border)
@@ -2741,7 +2740,7 @@ class FloatingMonitorApp:
         COL_R = W - PAD
 
         # ── outer card background ──
-        self._draw_rounded_rect(4, 7, W - 2, H - 2, r=18, fill="#050608", outline="")
+        self._draw_rounded_rect(4, 7, W - 2, H - 2, r=18, fill=Theme.shadow, outline="")
         self._draw_rounded_rect(0, 0, W, H - 5, r=18, fill=Theme.bg_card, outline=Theme.border, width=1)
 
         # ── subtle top accent lines ──
@@ -2752,7 +2751,7 @@ class FloatingMonitorApp:
         #  HEADER  (row y=10..48)
         # ════════════════════════════════════════════════════════
         y = 16
-        title_text = self.state.source_label if self.state else "MONITOR"
+        title_text = "Token Pulse"
         c.create_text(COL_L, y, anchor="nw", text=title_text,
                        font=self._fonts["font_title"], fill=Theme.amber_bright)
 
@@ -2771,7 +2770,7 @@ class FloatingMonitorApp:
         if self.state and self.state.mode == "local-codex":
             subtitle = f"\u6d3b\u8dc3 {active_count}  /  {updated}"
         c.create_text(COL_L, y + 24, anchor="nw", text=subtitle,
-                      font=self._fonts["font_micro"], fill=Theme.text_muted)
+                      font=self._fonts["font_micro"], fill=Theme.amber)
 
         btn_y = y - 2
         btn_specs = [
@@ -2956,7 +2955,7 @@ class FloatingMonitorApp:
         cost_stats = [
             ("\u4eca\u65e5", f"{compact_number(history.get('today_tokens', 0))} tok", Theme.ag_accent),
             ("\u6628\u65e5", f"{compact_number(history.get('yesterday_tokens', 0))} tok", Theme.ag_success),
-            ("\u65e5\u5747", f"{compact_number(float(history.get('seven_day_tokens') or 0) / 7)} tok", "#79E36B"),
+            ("\u65e5\u5747", f"{compact_number(float(history.get('seven_day_tokens') or 0) / 7)} tok", Theme.amber_glow),
         ]
         for i, (lbl, val, color) in enumerate(cost_stats):
             cx = COL_L + col_w * i + col_w // 2
@@ -2977,7 +2976,7 @@ class FloatingMonitorApp:
                 x1 = COL_L + index * (bar_w + gap)
                 x2 = min(COL_R, x1 + bar_w)
                 fill_h = max(2, int(bar_h * min(1.0, cost / max_cost))) if cost > 0 else 2
-                self._draw_rounded_rect(x1, bar_y, x2, bar_y + bar_h, r=3, fill="#242424", outline="")
+                self._draw_rounded_rect(x1, bar_y, x2, bar_y + bar_h, r=3, fill=Theme.ag_bg, outline="")
                 color = self._trend_token_color(intensity, index == 6)
                 self._draw_rounded_rect(x1, bar_y + bar_h - fill_h, x2, bar_y + bar_h, r=3, fill=color, outline="")
                 self._add_tooltip(
