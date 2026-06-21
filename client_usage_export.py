@@ -7,7 +7,7 @@ import re
 import sqlite3
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2082,6 +2082,134 @@ def latest_at_text(bucket: UsageBucket) -> str:
     return bucket.latest_at.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds")
 
 
+def same_day_output_high_water(output: dict[str, Any], existing_path: Path, day: date) -> None:
+    """Keep same-day local totals monotonic across account switches.
+
+    Codex can keep writing a long-running session while the selected account
+    marker changes. During that handoff, attribution may briefly miss the older
+    account even though the raw token events still exist. Preserve the previous
+    same-day snapshot so a transient empty attribution pass does not erase the
+    floating monitor's today totals.
+    """
+    try:
+        existing = json.loads(existing_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if str(existing.get("date") or "") != day.isoformat():
+        return
+
+    def tokens_of(row: Any) -> int:
+        if not isinstance(row, dict):
+            return 0
+        try:
+            return int(row.get("tokens") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def merge_cumulative(current: dict[str, Any], previous: dict[str, Any]) -> None:
+        if tokens_of(previous) <= tokens_of(current):
+            return
+        for key in (
+            "requests",
+            "tokens",
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_creation_input_tokens",
+            "output_tokens",
+            "cost",
+            "models",
+            "latest_at",
+            "latest_model",
+            "show_zero",
+        ):
+            if key in previous:
+                current[key] = previous[key]
+
+    def latest_time(row: Any) -> datetime | None:
+        if not isinstance(row, dict):
+            return None
+        return parse_dt(row.get("created_at") or row.get("latest_at"))
+
+    def merge_latest_request() -> None:
+        current = output.get("latest_request")
+        previous = existing.get("latest_request")
+        if not isinstance(previous, dict):
+            return
+        if not isinstance(current, dict) or not current.get("created_at"):
+            output["latest_request"] = previous
+            return
+        previous_dt = latest_time(previous)
+        current_dt = latest_time(current)
+        if previous_dt is not None and (current_dt is None or previous_dt > current_dt):
+            output["latest_request"] = previous
+
+    def merge_hourly_today() -> None:
+        current_dashboard = output.get("dashboard")
+        previous_dashboard = existing.get("dashboard")
+        if not isinstance(current_dashboard, dict) or not isinstance(previous_dashboard, dict):
+            return
+        current_hourly = current_dashboard.get("hourly_today")
+        previous_hourly = previous_dashboard.get("hourly_today")
+        if not isinstance(current_hourly, list) or not isinstance(previous_hourly, list):
+            return
+        current_by_hour = {
+            int(row.get("hour") or 0): row
+            for row in current_hourly
+            if isinstance(row, dict)
+        }
+        for previous_row in previous_hourly:
+            if not isinstance(previous_row, dict):
+                continue
+            hour = max(0, min(23, int(previous_row.get("hour") or 0)))
+            current_row = current_by_hour.get(hour)
+            if current_row is None:
+                current_hourly.append(previous_row)
+                current_by_hour[hour] = previous_row
+                continue
+            if tokens_of(previous_row) > tokens_of(current_row):
+                current_row.update(previous_row)
+
+    existing_today = existing.get("today")
+    current_today = output.get("today")
+    if isinstance(existing_today, dict) and isinstance(current_today, dict):
+        merge_cumulative(current_today, existing_today)
+    merge_latest_request()
+    merge_hourly_today()
+
+    current_providers = output.get("providers")
+    existing_providers = existing.get("providers")
+    if not isinstance(current_providers, list) or not isinstance(existing_providers, list):
+        return
+    current_by_name = {
+        str(provider.get("name") or ""): provider
+        for provider in current_providers
+        if isinstance(provider, dict) and provider.get("name")
+    }
+    for previous in existing_providers:
+        if not isinstance(previous, dict):
+            continue
+        name = str(previous.get("name") or "")
+        if not name:
+            continue
+        current = current_by_name.get(name)
+        if current is None:
+            current_providers.append(previous)
+            current_by_name[name] = previous
+            continue
+        merge_cumulative(current, previous)
+
+    provider_totals = [provider for provider in current_providers if isinstance(provider, dict)]
+    provider_tokens = sum(tokens_of(provider) for provider in provider_totals)
+    if isinstance(current_today, dict) and provider_tokens > tokens_of(current_today):
+        current_today["requests"] = sum(int(provider.get("requests") or 0) for provider in provider_totals)
+        current_today["tokens"] = provider_tokens
+        current_today["input_tokens"] = sum(int(provider.get("input_tokens") or 0) for provider in provider_totals)
+        current_today["cached_input_tokens"] = sum(int(provider.get("cached_input_tokens") or 0) for provider in provider_totals)
+        current_today["cache_creation_input_tokens"] = sum(int(provider.get("cache_creation_input_tokens") or 0) for provider in provider_totals)
+        current_today["output_tokens"] = sum(int(provider.get("output_tokens") or 0) for provider in provider_totals)
+        current_today["cost"] = round(sum(float(provider.get("cost") or 0) for provider in provider_totals), 6)
+
+
 def bucket_to_dict(name: str, bucket: UsageBucket, show_zero: bool = False) -> dict[str, Any]:
     result = {
         "name": name,
@@ -2434,6 +2562,7 @@ def main() -> int:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    same_day_output_high_water(output, out, day)
     out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(output["today"], ensure_ascii=False))
     return 0

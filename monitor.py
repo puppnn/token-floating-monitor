@@ -338,6 +338,11 @@ def token_mix_from_client_usage(client_usage: dict[str, Any] | None) -> dict[str
         mix["cached"] += int(row.get("cached_input_tokens") or 0)
         mix["cache_create"] += int(row.get("cache_creation_input_tokens") or 0)
         mix["output"] += int(row.get("output_tokens") or 0)
+    if isinstance(providers, list):
+        mix["input"] = max(mix["input"], int(client_usage.get("input_tokens") or 0))
+        mix["cached"] = max(mix["cached"], int(client_usage.get("cached_input_tokens") or 0))
+        mix["cache_create"] = max(mix["cache_create"], int(client_usage.get("cache_creation_input_tokens") or 0))
+        mix["output"] = max(mix["output"], int(client_usage.get("output_tokens") or 0))
     return mix
 
 
@@ -432,16 +437,19 @@ def update_usage_history(state: "MonitorState") -> dict[str, Any]:
     existing_source_date = str(existing.get("source_date") or "").strip()
     mix = token_mix_from_client_usage(state.client_usage if isinstance(state.client_usage, dict) else None)
 
-    # Same-day local usage is reconstructed from client logs, so a temporary
-    # scan failure can make a later snapshot smaller. Sub2API/both mode is
-    # rebuilt from server totals plus filtered local direct usage, so it is
-    # allowed to correct an older polluted high-water value.
-    use_local_high_water = state.usage_source in {"local", "client", "local-codex"}
-    if use_local_high_water and existing_source_date in {"", source_date, key}:
+    # Same-day client usage is reconstructed from local logs and account
+    # markers. Account switches can briefly make attribution smaller than the
+    # previous snapshot, so keep a high-water total for the current day.
+    use_client_high_water = state.usage_source in {"local", "client", "local-codex", "both"}
+    if use_client_high_water and existing_source_date in {"", source_date, key}:
         if existing_tokens > new_tokens and existing_tokens >= max(1, int(new_tokens * 1.05)):
             new_tokens = existing_tokens
             new_requests = max(new_requests, existing_requests)
             new_cost = max(new_cost, existing_cost)
+            mix["input"] = max(mix["input"], int(existing.get("input_tokens") or 0))
+            mix["cached"] = max(mix["cached"], int(existing.get("cached_input_tokens") or 0))
+            mix["cache_create"] = max(mix["cache_create"], int(existing.get("cache_creation_input_tokens") or 0))
+            mix["output"] = max(mix["output"], int(existing.get("output_tokens") or 0))
 
     days[key] = {
         "date": key,
@@ -3447,6 +3455,7 @@ class FloatingMonitorApp:
             pass
         self.error = error
         if result is not None:
+            self._protect_same_day_high_water(result)
             try:
                 result.cost_history = update_usage_history(result)
             except Exception:
@@ -3454,6 +3463,27 @@ class FloatingMonitorApp:
             self.state = result
             self._maybe_select_cycle_range(result)
         self._draw()
+
+    def _protect_same_day_high_water(self, result: MonitorState) -> None:
+        history = load_usage_history()
+        days = history.get("days") if isinstance(history, dict) else {}
+        existing = days.get(today_key()) if isinstance(days, dict) and isinstance(days.get(today_key()), dict) else {}
+        existing_tokens = int(existing.get("tokens") or 0)
+        current_tokens = int(result.today_tokens or 0)
+        if existing_tokens <= current_tokens or existing_tokens < max(1, int(current_tokens * 1.05)):
+            return
+        result.today_tokens = existing_tokens
+        result.today_requests = max(int(result.today_requests or 0), int(existing.get("requests") or 0))
+        result.today_account_cost = max(float(result.today_account_cost or 0), float(existing.get("cost") or 0))
+        if isinstance(result.client_usage, dict):
+            today = result.client_usage
+            today["tokens"] = result.today_tokens
+            today["requests"] = result.today_requests
+            today["cost"] = result.today_account_cost
+            today["input_tokens"] = max(int(today.get("input_tokens") or 0), int(existing.get("input_tokens") or 0))
+            today["cached_input_tokens"] = max(int(today.get("cached_input_tokens") or 0), int(existing.get("cached_input_tokens") or 0))
+            today["cache_creation_input_tokens"] = max(int(today.get("cache_creation_input_tokens") or 0), int(existing.get("cache_creation_input_tokens") or 0))
+            today["output_tokens"] = max(int(today.get("output_tokens") or 0), int(existing.get("output_tokens") or 0))
 
     def _handle_day_rollover(self, force: bool = False) -> bool:
         current_day = today_key()
