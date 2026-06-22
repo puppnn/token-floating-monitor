@@ -440,8 +440,8 @@ def update_usage_history(state: "MonitorState") -> dict[str, Any]:
     # Same-day client usage is reconstructed from local logs and account
     # markers. Account switches can briefly make attribution smaller than the
     # previous snapshot, so keep a high-water total for the current day.
-    use_client_high_water = state.usage_source in {"local", "client", "local-codex", "both"}
-    if use_client_high_water and existing_source_date in {"", source_date, key}:
+    use_local_high_water = state.usage_source in {"local", "client", "local-codex"}
+    if use_local_high_water and existing_source_date in {"", source_date, key}:
         if existing_tokens > new_tokens and existing_tokens >= max(1, int(new_tokens * 1.05)):
             new_tokens = existing_tokens
             new_requests = max(new_requests, existing_requests)
@@ -3465,6 +3465,8 @@ class FloatingMonitorApp:
         self._draw()
 
     def _protect_same_day_high_water(self, result: MonitorState) -> None:
+        if result.usage_source not in {"local", "client", "local-codex"}:
+            return
         history = load_usage_history()
         days = history.get("days") if isinstance(history, dict) else {}
         existing = days.get(today_key()) if isinstance(days, dict) and isinstance(days.get(today_key()), dict) else {}
