@@ -155,7 +155,7 @@ class LocalExportHighWaterTests(unittest.TestCase):
 
 
 class WindowSemanticsTests(unittest.TestCase):
-    def test_rolling_usage_is_not_replaced_by_quota_cycle_usage(self) -> None:
+    def test_5h_uses_quota_cycle_while_7d_remains_rolling(self) -> None:
         now = datetime(2026, 6, 22, 12, 0, 0)
         label = "Codex local - account@example.com"
         rolling_5h = client_usage_export.UsageBucket(
@@ -224,8 +224,9 @@ class WindowSemanticsTests(unittest.TestCase):
 
         window_5h = result[label]["window_5h"]
         window_7d = result[label]["window_7d"]
-        self.assertEqual(window_5h["tokens"], 5_000_000)
+        self.assertEqual(window_5h["tokens"], 2_000_000)
         self.assertEqual(window_5h["utilization"], 90.0)
+        self.assertTrue(window_5h["start_at"].startswith("2026-06-22T10:00:00"))
         self.assertEqual(window_7d["tokens"], 66_000_000)
         self.assertEqual(window_7d["utilization"], 83.0)
         self.assertTrue(window_7d["start_at"].startswith("2026-06-15T12:00:00"))

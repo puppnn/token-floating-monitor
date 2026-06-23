@@ -3051,7 +3051,7 @@ class FloatingMonitorApp:
 
         tab_specs = [
             ("rank_today", "\u4eca\u65e5", "today"),
-            ("rank_5h", "\u8fd1 5 \u5c0f\u65f6", "5h"),
+            ("rank_5h", "5h \u5468\u671f", "5h"),
             ("rank_7d", "\u8fd1 7 \u5929", "7d"),
             ("rank_cycle", "\u5468\u671f", "cycle"),
         ]
