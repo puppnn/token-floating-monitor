@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,6 +69,210 @@ class UsageHistoryIsolationTests(unittest.TestCase):
         saved = monitor.load_usage_history()["days"][self.day]
         self.assertEqual(state.today_tokens, 100_000)
         self.assertEqual(saved["tokens"], 1_000_000)
+
+
+class AccountUsageSortTests(unittest.TestCase):
+    def test_5h_and_7d_sort_recently_used_accounts_first(self) -> None:
+        rows = [
+            {
+                "name": "old-heavy",
+                "tokens": 20_000_000,
+                "requests": 50,
+                "latest_at": "2026-06-25T10:00:00+08:00",
+            },
+            {
+                "name": "current-light",
+                "tokens": 1_000,
+                "requests": 1,
+                "latest_at": "2026-06-25T11:00:00+08:00",
+            },
+        ]
+
+        ordered_5h = sorted(rows, key=lambda row: monitor.account_usage_sort_key(row, "5h"))
+        ordered_7d = sorted(rows, key=lambda row: monitor.account_usage_sort_key(row, "7d"))
+
+        self.assertEqual(ordered_5h[0]["name"], "current-light")
+        self.assertEqual(ordered_7d[0]["name"], "current-light")
+
+    def test_today_and_30d_sort_by_token_usage(self) -> None:
+        rows = [
+            {
+                "name": "recent-light",
+                "tokens": 1_000,
+                "requests": 100,
+                "latest_at": "2026-06-25T11:00:00+08:00",
+            },
+            {
+                "name": "old-heavy",
+                "tokens": 20_000_000,
+                "requests": 1,
+                "latest_at": "2026-06-25T10:00:00+08:00",
+            },
+        ]
+
+        ordered_today = sorted(rows, key=lambda row: monitor.account_usage_sort_key(row, "today"))
+        ordered_30d = sorted(rows, key=lambda row: monitor.account_usage_sort_key(row, "30d"))
+
+        self.assertEqual(ordered_today[0]["name"], "old-heavy")
+        self.assertEqual(ordered_30d[0]["name"], "old-heavy")
+
+
+class ApiServicePoolAggregateTests(unittest.TestCase):
+    def test_api_service_pool_row_sums_pool_accounts(self) -> None:
+        rows = [
+            {
+                "name": "tissue",
+                "tokens": 700,
+                "requests": 7,
+                "cost": 0.7,
+                "latest_at": "2026-06-29T09:20:00+08:00",
+                "latest_model": "gpt-5.4",
+                "window_5h": {
+                    "tokens": 650,
+                    "requests": 6,
+                    "cost": 0.65,
+                    "remaining_percent": 99.0,
+                    "utilization": 1.0,
+                    "quota_available": True,
+                    "latest_at": "2026-06-29T09:20:00+08:00",
+                },
+            },
+            {
+                "name": "hails",
+                "tokens": 300,
+                "requests": 3,
+                "cost": 0.3,
+                "latest_at": "2026-06-29T09:23:00+08:00",
+                "latest_model": "gpt-5.5",
+                "window_5h": {
+                    "tokens": 300,
+                    "requests": 3,
+                    "cost": 0.3,
+                    "remaining_percent": 98.0,
+                    "utilization": 2.0,
+                    "quota_available": True,
+                    "latest_at": "2026-06-29T09:23:00+08:00",
+                },
+            },
+        ]
+
+        aggregate = monitor.build_api_service_pool_row(rows)
+
+        self.assertIsNotNone(aggregate)
+        assert aggregate is not None
+        self.assertEqual(aggregate["tokens"], 1000)
+        self.assertEqual(aggregate["requests"], 10)
+        self.assertAlmostEqual(aggregate["cost"], 1.0)
+        self.assertEqual(aggregate["latest_at"], "2026-06-29T09:23:00+08:00")
+        self.assertEqual(aggregate["latest_model"], "gpt-5.5")
+        self.assertEqual(aggregate["window_5h"]["tokens"], 950)
+        self.assertNotIn("quota_available", aggregate["window_5h"])
+        self.assertNotIn("remaining_percent", aggregate["window_5h"])
+        self.assertNotIn("utilization", aggregate["window_5h"])
+
+    def test_api_service_local_mirror_is_subtracted_from_client_usage(self) -> None:
+        usage = {
+            "requests": 11,
+            "tokens": 1100,
+            "cost": 1.1,
+            "providers": [
+                {
+                    "name": "Codex local - api-service-local",
+                    "requests": 10,
+                    "tokens": 1000,
+                    "cost": 1.0,
+                },
+                {
+                    "name": "Codex local - direct-account",
+                    "requests": 1,
+                    "tokens": 100,
+                    "cost": 0.1,
+                },
+            ],
+        }
+
+        result = monitor.subtract_sub2api_mirrored_api_key_usage(usage, 1000, {})
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["tokens"], 100)
+        self.assertEqual(len(result["providers"]), 1)
+        self.assertEqual(result["providers"][0]["name"], "Codex local - direct-account")
+
+    def test_account_row_pool_filter_uses_manifest_emails(self) -> None:
+        pool = {"hails24.uranium@icloud.com", "tissue_wisp.24+g5@icloud.com"}
+
+        self.assertTrue(
+            monitor.account_row_matches_pool(
+                {"name": "Codex local - hails24.uranium@icloud.com"},
+                pool,
+            )
+        )
+        self.assertFalse(
+            monitor.account_row_matches_pool(
+                {"name": "Codex local - rollers_tubers4s@icloud.com"},
+                pool,
+            )
+        )
+
+
+class LocalActiveAccountTests(unittest.TestCase):
+    def test_active_accounts_are_deduped_by_active_sessions(self) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        usage = {
+            "active_sessions": [
+                {
+                    "session_id": "session-1",
+                    "provider": "Codex local - hails24.uranium@icloud.com",
+                    "model": "gpt-5.5",
+                    "latest_at": now,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "Codex local - hails24.uranium@icloud.com",
+                    "latest_at": now,
+                    "latest_model": "gpt-5.5",
+                    "recent_sessions": 0,
+                },
+                {
+                    "name": "Codex local - api-service-local",
+                    "latest_at": now,
+                    "latest_model": "gpt-5.5",
+                    "recent_sessions": 0,
+                },
+                {
+                    "name": "Codex local - codex_local_access_runtime",
+                    "latest_at": now,
+                    "latest_model": "gpt-5.5",
+                    "recent_sessions": 0,
+                },
+            ],
+        }
+
+        active = monitor.local_active_accounts_from_client_usage(usage)
+
+        self.assertEqual(len(active), 1)
+        self.assertIn("hails24.uranium@icloud.com", active[0]["name"])
+        self.assertEqual(active[0]["current"], 1)
+
+    def test_recent_provider_without_recent_session_is_not_active(self) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        usage = {
+            "providers": [
+                {
+                    "name": "Codex local - stale-provider",
+                    "latest_at": now,
+                    "latest_model": "gpt-5.5",
+                    "recent_sessions": 0,
+                }
+            ],
+            "latest_request": {},
+        }
+
+        active = monitor.local_active_accounts_from_client_usage(usage)
+
+        self.assertEqual(active, [])
 
 
 class LocalExportHighWaterTests(unittest.TestCase):
@@ -240,6 +444,20 @@ class WindowSemanticsTests(unittest.TestCase):
 
         self.assertFalse(window["quota_idle"])
         self.assertTrue(window["countdown_active"])
+
+    def test_quota_window_start_allows_small_clock_skew(self) -> None:
+        now = datetime(2026, 6, 29, 11, 0, 0)
+        window = {
+            "quota_available": True,
+            "quota_stale": False,
+            "resets_at": "2026-06-29T14:22:53+08:00",
+        }
+
+        start = client_usage_export.quota_window_start(window, now, timedelta(hours=5))
+
+        self.assertIsNotNone(start)
+        assert start is not None
+        self.assertTrue(start <= datetime(2026, 6, 29, 9, 22, 51))
 
     def test_quota_windows_use_quota_cycle_boundaries(self) -> None:
         now = datetime(2026, 6, 22, 12, 0, 0)

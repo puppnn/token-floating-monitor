@@ -69,6 +69,7 @@ CODEX_ACCOUNT_MATCH_WINDOW_SECONDS = int(os.environ.get("CLIENT_USAGE_CODEX_ACCO
 CODEX_CURRENT_ACCOUNT_RECENT_SECONDS = int(os.environ.get("CLIENT_USAGE_CURRENT_ACCOUNT_RECENT_SECONDS", "1800"))
 CLIENT_USAGE_ACTIVE_WINDOW_SECONDS = int(os.environ.get("CLIENT_USAGE_ACTIVE_WINDOW_SECONDS", "300"))
 ACCOUNT_30D_CACHE_SECONDS = int(os.environ.get("CLIENT_USAGE_ACCOUNT_30D_CACHE_SECONDS", "300"))
+QUOTA_WINDOW_START_TOLERANCE_SECONDS = int(os.environ.get("CLIENT_USAGE_QUOTA_WINDOW_START_TOLERANCE_SECONDS", "10"))
 UNASSIGNED_CODEX_LABEL = os.environ.get("CLIENT_USAGE_UNASSIGNED_CODEX_LABEL", "Unassigned local")
 CODEX_FAST_COST_MULTIPLIER = env_float("CLIENT_USAGE_CODEX_FAST_COST_MULTIPLIER", 2.0)
 CODEX_FORCE_SPEED = os.environ.get("CLIENT_USAGE_CODEX_FORCE_SPEED", "").strip().lower()
@@ -1563,7 +1564,7 @@ def quota_window_start(
     reset_at = parse_dt(window.get("resets_at"))
     if reset_at is None or reset_at <= now or reset_at > now + duration:
         return None
-    start_at = reset_at - duration
+    start_at = reset_at - duration - timedelta(seconds=max(0, QUOTA_WINDOW_START_TOLERANCE_SECONDS))
     return start_at if start_at <= now else None
 
 
@@ -2315,13 +2316,18 @@ def bucket_to_dict(name: str, bucket: UsageBucket, show_zero: bool = False) -> d
 
 
 def bucket_to_window_dict(bucket: UsageBucket, start: datetime, end: datetime) -> dict[str, Any]:
-    return {
+    result = {
         "requests": bucket.requests,
         "tokens": bucket.total_tokens,
         "cost": round(bucket.cost, 6),
         "start_at": start.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
         "end_at": end.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
     }
+    latest = latest_at_text(bucket)
+    if latest:
+        result["latest_at"] = latest
+        result["latest_model"] = bucket.latest_model
+    return result
 
 
 def apply_5h_countdown_state(window: dict[str, Any]) -> None:
@@ -2673,6 +2679,7 @@ def main() -> int:
     recent_cutoff = now - timedelta(seconds=max(1, CLIENT_USAGE_ACTIVE_WINDOW_SECONDS))
     recent_active_by_label: dict[str, int] = {}
     recent_sessions_by_label: dict[str, int] = {}
+    recent_latest_by_session: dict[str, tuple[str, UsageEvent]] = {}
     recent_events_by_label = attribute_codex_events_by_account(
         codex_events,
         markers,
@@ -2682,13 +2689,33 @@ def main() -> int:
     )
     for label, account_events in recent_events_by_label.items():
         recent_events = [event for event in account_events if event.when >= recent_cutoff]
-        recent_active_by_label[label] = len(recent_events)
-        recent_sessions_by_label[label] = len(
+        for event in recent_events:
+            session_id = event.session_id or event.request_key or codex_event_id(event)
+            previous = recent_latest_by_session.get(session_id)
+            if (
+                previous is None
+                or event.when > previous[1].when
+                or (
+                    event.when == previous[1].when
+                    and "@" in label
+                    and "@" not in previous[0]
+                )
+            ):
+                recent_latest_by_session[session_id] = (label, event)
+    active_sessions = []
+    for session_id, (label, event) in recent_latest_by_session.items():
+        recent_active_by_label[label] = recent_active_by_label.get(label, 0) + 1
+        recent_sessions_by_label[label] = recent_sessions_by_label.get(label, 0) + 1
+        active_sessions.append(
             {
-                event.session_id or event.request_key or codex_event_id(event)
-                for event in recent_events
+                "session_id": session_id,
+                "provider": label,
+                "model": event.model,
+                "latest_at": event.when.replace(tzinfo=LOCAL_TZ).isoformat(timespec="seconds"),
+                "tokens": event.total_tokens,
             }
         )
+    active_sessions.sort(key=lambda row: str(row.get("latest_at") or ""), reverse=True)
 
     codex_providers = []
     for name, bucket in codex_provider_buckets:
@@ -2742,6 +2769,7 @@ def main() -> int:
             "created_at": latest_at,
             "kind": "success" if latest_at else "",
         },
+        "active_sessions": active_sessions,
         "dashboard": {
             "hourly_today": hourly_today,
         },

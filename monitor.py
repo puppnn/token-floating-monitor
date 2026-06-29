@@ -521,6 +521,30 @@ def _parse_time(value: str | None) -> datetime | None:
         return None
 
 
+def account_usage_sort_key(row: dict[str, Any], account_range: str) -> tuple[Any, ...]:
+    name = str(row.get("name") or "")
+    try:
+        tokens = int(row.get("tokens") or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    try:
+        requests = int(row.get("requests") or 0)
+    except (TypeError, ValueError):
+        requests = 0
+    if account_range in {"5h", "7d"}:
+        latest_at = str(
+            row.get("latest_at")
+            or row.get("latest_request_at")
+            or row.get("created_at")
+            or ""
+        )
+        latest = _parse_time(latest_at)
+        latest_ts = latest.timestamp() if latest is not None else 0.0
+        active_rank = 1 if row.get("active_now") or row.get("is_latest") else 0
+        return (-active_rank, -latest_ts, -tokens, -requests, name)
+    return (-tokens, -requests, name)
+
+
 def is_recent_activity(value: str | None, window_seconds: int = LOCAL_ACTIVE_WINDOW_SECONDS) -> bool:
     dt = _parse_time(value)
     if dt is None:
@@ -540,15 +564,56 @@ def local_active_accounts_from_client_usage(
         return []
     providers = client_usage.get("providers")
     providers = providers if isinstance(providers, list) else []
+    active_sessions = client_usage.get("active_sessions")
+    if isinstance(active_sessions, list):
+        active_by_provider: dict[str, dict[str, Any]] = {}
+        for index, session in enumerate(active_sessions):
+            if not isinstance(session, dict):
+                continue
+            latest_at = str(session.get("latest_at") or "")
+            if not is_recent_activity(latest_at):
+                continue
+            provider_name = str(session.get("provider") or "Local client")
+            row = active_by_provider.get(provider_name)
+            if row is None:
+                row = {
+                    "id": f"local-session-{index}",
+                    "name": f"LOCAL - {local_provider_display_name(provider_name)}",
+                    "current": 0,
+                    "max": 0,
+                    "model": session.get("model") or "-",
+                    "source": "LOCAL",
+                    "speed_badge": "",
+                    "latest_at": latest_at,
+                }
+                active_by_provider[provider_name] = row
+            row["current"] = int(row.get("current") or 0) + 1
+            row["max"] = int(row.get("current") or 0)
+            existing_latest = _parse_time(str(row.get("latest_at") or ""))
+            session_latest = _parse_time(latest_at)
+            if session_latest is not None and (existing_latest is None or session_latest > existing_latest):
+                row["latest_at"] = latest_at
+                row["model"] = session.get("model") or row.get("model") or "-"
+        active = list(active_by_provider.values())
+        if active:
+            active.sort(key=lambda row: _parse_time(str(row.get("latest_at") or "")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            return active
+
     active: list[dict[str, Any]] = []
     for index, provider in enumerate(providers):
         if not isinstance(provider, dict):
+            continue
+        recent_sessions_raw = provider.get("recent_sessions")
+        try:
+            recent_sessions = int(recent_sessions_raw or 0)
+        except (TypeError, ValueError):
+            recent_sessions = 0
+        if recent_sessions <= 0:
             continue
         latest_at = str(provider.get("latest_at") or "")
         if not is_recent_activity(latest_at):
             continue
         provider_name = str(provider.get("name") or "Local client")
-        recent_sessions = max(1, int(provider.get("recent_sessions") or 0))
         active.append(
             {
                 "id": f"local-{index}",
@@ -642,6 +707,19 @@ def normalize_usage_window(progress: Any) -> dict[str, Any]:
             result["remaining_percent"] = max(0.0, min(100.0, 100.0 - used))
         except (TypeError, ValueError):
             result["quota_available"] = False
+    latest_at = (
+        stats.get("latest_at")
+        or stats.get("last_request_at")
+        or stats.get("latest_request_at")
+        or progress.get("latest_at")
+        or progress.get("last_request_at")
+        or progress.get("latest_request_at")
+    )
+    if latest_at:
+        result["latest_at"] = str(latest_at)
+    latest_model = stats.get("latest_model") or progress.get("latest_model")
+    if latest_model:
+        result["latest_model"] = str(latest_model)
     return result
 
 
@@ -786,6 +864,160 @@ def is_local_api_key_provider_name(name: str) -> bool:
     return name.strip().lower().startswith("codex local - api-key-")
 
 
+def is_local_api_service_provider_name(name: str) -> bool:
+    display_name = ranking_account_display_name(name).strip().lower()
+    return display_name in {"api-service-local", "api service local"}
+
+
+def load_local_api_service_pool_emails(home: Path | None = None) -> set[str]:
+    root = home or Path.home()
+    manifest = root / ".antigravity_cockpit" / "codex_local_access_sidecar" / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return set()
+    items = data.get("accounts") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return set()
+    emails: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        email = str(item.get("email") or "").strip().lower()
+        if "@" in email:
+            emails.add(email)
+    return emails
+
+
+def account_row_matches_pool(row: dict[str, Any], pool_emails: set[str]) -> bool:
+    if not pool_emails:
+        return "@" in str(row.get("name") or "")
+    haystack = " ".join(
+        str(row.get(key) or "").lower()
+        for key in ("name", "email", "account_email")
+    )
+    return any(email in haystack for email in pool_emails)
+
+
+def _max_time_text(values: list[str]) -> str:
+    latest_text = ""
+    latest_dt: datetime | None = None
+    for value in values:
+        dt = _parse_time(value)
+        if dt is None:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+            latest_text = value
+    return latest_text
+
+
+def _soonest_future_time_text(values: list[str]) -> str:
+    now = datetime.now(timezone.utc)
+    selected_text = ""
+    selected_dt: datetime | None = None
+    for value in values:
+        dt = _parse_time(value)
+        if dt is None or dt <= now:
+            continue
+        if selected_dt is None or dt < selected_dt:
+            selected_dt = dt
+            selected_text = value
+    return selected_text
+
+
+def merge_account_windows(rows: list[dict[str, Any]], window_key: str) -> dict[str, Any]:
+    windows = [
+        row.get(window_key)
+        for row in rows
+        if isinstance(row.get(window_key), dict)
+    ]
+    if not windows:
+        return {}
+    result: dict[str, Any] = {
+        "requests": sum(int(window.get("requests") or 0) for window in windows),
+        "tokens": sum(int(window.get("tokens") or 0) for window in windows),
+        "cost": round(sum(float(window.get("cost") or 0) for window in windows), 6),
+    }
+    latest_at = _max_time_text([str(window.get("latest_at") or "") for window in windows])
+    if latest_at:
+        result["latest_at"] = latest_at
+    latest_model = ""
+    latest_dt = _parse_time(latest_at)
+    if latest_dt is not None:
+        for window in windows:
+            if _parse_time(str(window.get("latest_at") or "")) == latest_dt:
+                latest_model = str(window.get("latest_model") or "")
+                break
+    if latest_model:
+        result["latest_model"] = latest_model
+    starts = [str(window.get("start_at") or "") for window in windows if window.get("start_at")]
+    ends = [str(window.get("end_at") or "") for window in windows if window.get("end_at")]
+    if starts:
+        result["start_at"] = min(starts)
+    if ends:
+        result["end_at"] = max(ends)
+
+    quota_windows = [window for window in windows if window.get("quota_available")]
+    if quota_windows:
+        result["quota_available"] = True
+        result["quota_stale"] = any(bool(window.get("quota_stale")) for window in quota_windows)
+        result["utilization"] = round(
+            sum(float(window.get("utilization") or 0) for window in quota_windows),
+            2,
+        )
+        result["remaining_percent"] = round(
+            sum(float(window.get("remaining_percent") or 0) for window in quota_windows),
+            2,
+        )
+        reset = _soonest_future_time_text([str(window.get("resets_at") or "") for window in quota_windows])
+        if reset:
+            result["resets_at"] = reset
+    return result
+
+
+def build_api_service_pool_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    requests_count = sum(int(row.get("requests") or 0) for row in rows)
+    tokens = sum(int(row.get("tokens") or 0) for row in rows)
+    cost = round(sum(float(row.get("cost") or 0) for row in rows), 6)
+    if requests_count <= 0 and tokens <= 0 and cost <= 0:
+        return None
+    latest_at = _max_time_text([str(row.get("latest_at") or "") for row in rows])
+    latest_model = ""
+    latest_dt = _parse_time(latest_at)
+    if latest_dt is not None:
+        for row in rows:
+            if _parse_time(str(row.get("latest_at") or "")) == latest_dt:
+                latest_model = str(row.get("latest_model") or "")
+                break
+    window_5h = merge_account_windows(rows, "window_5h")
+    window_7d = merge_account_windows(rows, "window_7d")
+    window_30d = merge_account_windows(rows, "window_30d")
+    window_cycle = merge_account_windows(rows, "window_cycle")
+    for window in (window_5h, window_7d, window_cycle):
+        for key in ("quota_available", "quota_stale", "utilization", "remaining_percent", "resets_at"):
+            window.pop(key, None)
+    return {
+        "name": "api-service-local",
+        "tokens": tokens,
+        "requests": requests_count,
+        "cost": cost,
+        "health_badge": "",
+        "source_badge": "LOCAL",
+        "latest_at": latest_at,
+        "latest_model": latest_model,
+        "window_5h": window_5h,
+        "window_7d": window_7d,
+        "window_30d": window_30d,
+        "window_cycle": window_cycle,
+        "active_now": any(bool(row.get("active_now")) for row in rows),
+        "is_latest": any(bool(row.get("is_latest")) for row in rows),
+        "is_pool_aggregate": True,
+    }
+
+
 def load_client_route_labels() -> dict[str, set[str]]:
     empty = {"sub2api_mirrored": set(), "direct": set()}
     try:
@@ -874,8 +1106,8 @@ def subtract_sub2api_mirrored_api_key_usage(
     server_tokens: int,
     route_labels: dict[str, set[str]] | None = None,
 ) -> dict[str, Any] | None:
-    """Remove local API-key rows that mirror already-counted Sub2API traffic."""
-    if not isinstance(client_usage, dict) or server_tokens <= 0:
+    """Remove local API service/key rows that mirror already-counted Sub2API traffic."""
+    if not isinstance(client_usage, dict):
         return client_usage
     providers = client_usage.get("providers")
     if not isinstance(providers, list):
@@ -888,7 +1120,9 @@ def subtract_sub2api_mirrored_api_key_usage(
             continue
         name = str(provider.get("name") or "")
         tokens = int(provider.get("tokens") or 0)
-        if is_local_api_key_provider_name(name) and name in mirrored and tokens > 0:
+        if server_tokens > 0 and is_local_api_key_provider_name(name) and name in mirrored and tokens > 0:
+            result = subtract_provider_from_client_usage(result, name)
+        elif is_local_api_service_provider_name(name) and tokens > 0:
             result = subtract_provider_from_client_usage(result, name)
     return result
 
@@ -1036,6 +1270,8 @@ def build_local_monitor_state(
                     "app_speed": provider.get("app_speed") or "",
                     "cost_multiplier": provider.get("cost_multiplier") or 1,
                     "speed_badge": provider.get("speed_badge") or "",
+                    "latest_at": provider.get("latest_at") or "",
+                    "latest_model": provider.get("latest_model") or "",
                     "window_5h": provider.get("window_5h") or {},
                     "window_7d": provider.get("window_7d") or {},
                     "window_30d": provider.get("window_30d") or {},
@@ -1485,6 +1721,7 @@ class Sub2APIClient:
             tokens = int(account_stats.get("tokens") or 0)
             requests_count = int(account_stats.get("requests") or 0)
             cost = float(account_stats.get("cost") or 0)
+            is_latest = bool(latest and int(latest.get("account_id") or 0) == account_id)
             realtime_today_requests += requests_count
             realtime_today_tokens += tokens
             realtime_today_cost += cost
@@ -1501,15 +1738,29 @@ class Sub2APIClient:
                     "window_30d": account_30d_by_id.get(account_id) or {},
                     "window_cycle": account_windows.get("window_cycle") or {},
                     "active_now": any(int(row.get("id") or 0) == account_id for row in active_accounts),
-                    "is_latest": bool(latest and int(latest.get("account_id") or 0) == account_id),
+                    "is_latest": is_latest,
+                    "latest_at": str(latest.get("created_at") or "") if is_latest else "",
+                    "latest_model": str(latest.get("model") or "") if is_latest else "",
                 }
             )
         top_accounts.sort(key=lambda row: (-row["tokens"], -row["requests"], row["name"]))
+        sub2api_pool_rows = list(top_accounts)
         include_client_usage = self._should_include_client_usage(resolved_source)
         points_to_sub2api, _codex_urls = self._codex_points_to_sub2api()
         show_local_activity = include_client_usage and points_to_sub2api is not True
         raw_client_usage = self._load_client_usage_cached() if include_client_usage else None
         client_usage = subtract_sub2api_routed_client_usage(raw_client_usage)
+        raw_providers = raw_client_usage.get("providers") if isinstance(raw_client_usage, dict) else []
+        has_api_service_local_provider = any(
+            isinstance(provider, dict)
+            and is_local_api_service_provider_name(str(provider.get("name") or ""))
+            for provider in (raw_providers if isinstance(raw_providers, list) else [])
+        )
+        api_service_pool_emails = (
+            load_local_api_service_pool_emails()
+            if has_api_service_local_provider
+            else set()
+        )
         route_labels = load_client_route_labels()
         raw_latest = raw_client_usage.get("latest_request") if isinstance(raw_client_usage, dict) else {}
         latest_provider_name = (
@@ -1556,10 +1807,25 @@ class Sub2APIClient:
             ledger_source = resolved_source
             ledger_note = usage_note
 
+        sub2api_pool_candidates = [
+            row
+            for row in sub2api_pool_rows
+            if account_row_matches_pool(row, api_service_pool_emails)
+        ]
+        api_service_pool_row = (
+            build_api_service_pool_row(sub2api_pool_candidates)
+            if has_api_service_local_provider
+            else None
+        )
+
         providers = client_usage.get("providers") if isinstance(client_usage, dict) else []
+        local_pool_rows: list[dict[str, Any]] = []
         if isinstance(providers, list):
             for provider in providers:
                 if not isinstance(provider, dict):
+                    continue
+                provider_name = str(provider.get("name") or "")
+                if has_api_service_local_provider and is_local_api_service_provider_name(provider_name):
                     continue
                 provider_tokens = int(provider.get("tokens") or 0)
                 provider_requests = int(provider.get("requests") or 0)
@@ -1571,26 +1837,34 @@ class Sub2APIClient:
                     and not provider.get("show_zero")
                 ):
                     continue
-                top_accounts.append(
-                    {
-                        "name": local_provider_display_name(str(provider.get("name") or "Local client")),
-                        "tokens": provider_tokens,
-                        "requests": provider_requests,
-                        "cost": provider_cost,
-                        "health_badge": "",
-                        "source_badge": "LOCAL",
-                        "app_speed": provider.get("app_speed") or "",
-                        "cost_multiplier": provider.get("cost_multiplier") or 1,
-                        "speed_badge": provider.get("speed_badge") or "",
-                        "window_5h": provider.get("window_5h") or {},
-                        "window_7d": provider.get("window_7d") or {},
-                        "window_30d": provider.get("window_30d") or {},
-                        "window_cycle": provider.get("window_cycle") or {},
-                        "active_now": False,
-                        "is_latest": str(provider.get("name") or "") == latest_provider_name,
-                    }
-                )
+                row = {
+                    "name": local_provider_display_name(provider_name or "Local client"),
+                    "tokens": provider_tokens,
+                    "requests": provider_requests,
+                    "cost": provider_cost,
+                    "health_badge": "",
+                    "source_badge": "LOCAL",
+                    "app_speed": provider.get("app_speed") or "",
+                    "cost_multiplier": provider.get("cost_multiplier") or 1,
+                    "speed_badge": provider.get("speed_badge") or "",
+                    "latest_at": provider.get("latest_at") or "",
+                    "latest_model": provider.get("latest_model") or "",
+                    "window_5h": provider.get("window_5h") or {},
+                    "window_7d": provider.get("window_7d") or {},
+                    "window_30d": provider.get("window_30d") or {},
+                    "window_cycle": provider.get("window_cycle") or {},
+                    "active_now": False,
+                    "is_latest": provider_name == latest_provider_name,
+                }
+                top_accounts.append(row)
+                if account_row_matches_pool(row, api_service_pool_emails):
+                    local_pool_rows.append(row)
             top_accounts.sort(key=lambda row: (-row["tokens"], -row["requests"], row["name"]))
+        if api_service_pool_row is None and has_api_service_local_provider:
+            api_service_pool_row = build_api_service_pool_row(local_pool_rows)
+        if api_service_pool_row is not None:
+            top_accounts.append(api_service_pool_row)
+        top_accounts.sort(key=lambda row: (-row["tokens"], -row["requests"], row["name"]))
 
         display_latest = latest
         display_latest_account_name = latest_account_name
@@ -3096,6 +3370,8 @@ class FloatingMonitorApp:
         if range_key:
             top = []
             for account in raw_top:
+                if self._account_range in {"5h", "7d"} and account.get("is_pool_aggregate"):
+                    continue
                 window = account.get(range_key)
                 if not isinstance(window, dict) or not window:
                     continue
@@ -3112,11 +3388,13 @@ class FloatingMonitorApp:
                 item["utilization"] = window.get("utilization")
                 item["remaining_percent"] = window.get("remaining_percent")
                 item["resets_at"] = str(window.get("resets_at") or "")
+                item["latest_at"] = window.get("latest_at") or account.get("latest_at") or ""
+                item["latest_model"] = window.get("latest_model") or account.get("latest_model") or ""
                 item["quota_available"] = has_quota
                 item["quota_stale"] = bool(window.get("quota_stale"))
                 item["quota_idle"] = bool(window.get("quota_idle")) if self._account_range == "5h" else False
                 top.append(item)
-            top.sort(key=lambda row: (-row["tokens"], -row["requests"], row["name"]))
+            top.sort(key=lambda row: account_usage_sort_key(row, self._account_range))
         else:
             top = raw_top
 
